@@ -1,0 +1,688 @@
+name: F-Droid Variant Builds
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 */2 * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: retroarch-fdroid-release
+  cancel-in-progress: false
+
+env:
+  FDROID_METADATA_URL: https://gitlab.com/fdroid/fdroiddata.git
+  FDROID_APP_ID: com.retroarch
+
+  ANDROID_PLATFORM: "android-30"
+  ANDROID_BUILD_TOOLS: "30.0.3"
+  ANDROID_NDK: "22.0.7026061"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            file \
+            curl \
+            unzip \
+            zip \
+
+      - name: Install Android SDK/NDK versions used by F-Droid
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platforms;${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK}"
+
+      - name: Read latest RetroArch build from F-Droid metadata
+        id: metadata
+        run: |
+          git clone --depth 1 \
+            "${FDROID_METADATA_URL}" \
+            fdroiddata
+
+          ruby <<'RUBY'
+          require "yaml"
+
+          path = "fdroiddata/metadata/com.retroarch.yml"
+          data = YAML.load_file(path)
+
+          abort "Unexpected RepoType" unless data["RepoType"] == "git"
+
+          abort "Unexpected RetroArch repository" unless
+            data["Repo"] == "https://github.com/libretro/RetroArch.git"
+
+          builds = data.fetch("Builds")
+
+          builds = builds.reject do |build|
+            build["disable"] ||
+              build["commit"].to_s.start_with?("!")
+          end
+
+          abort "No enabled RetroArch builds found" if builds.empty?
+
+          build = builds.max_by do |entry|
+            Integer(entry.fetch("versionCode"))
+          end
+
+          abort "Expected pkg/android/phoenix" unless
+            build["subdir"] == "pkg/android/phoenix"
+
+          gradle = build["gradle"] || []
+
+          abort "Expected F-Droid Gradle flavor to be exactly 'normal'" unless
+            gradle == ["normal"]
+
+          version = build.fetch("versionName")
+          version_code = Integer(build.fetch("versionCode"))
+          commit = build.fetch("commit")
+          ndk = build.fetch("ndk").to_s
+
+          abort "Expected a 40-character git commit" unless
+            commit.match?(/\A[0-9a-f]{40}\z/)
+
+          unless ["r22", "22.0.7026061"].include?(ndk)
+            abort "Unexpected F-Droid NDK requirement: #{ndk}"
+          end
+
+          prebuild = build.fetch("prebuild", [])
+          joined_prebuild = prebuild.join("\n")
+
+          asset_cmd = prebuild.find do |command|
+            command.include?("curl -Lo assets.zip")
+          end
+
+          hash_cmd = prebuild.find do |command|
+            command.include?("sha256sum -c")
+          end
+
+          abort "Could not find GLUI asset download in F-Droid metadata" unless
+            asset_cmd
+
+          abort "Could not find GLUI asset checksum in F-Droid metadata" unless
+            hash_cmd
+
+          asset_url = asset_cmd[
+            /curl\s+-Lo\s+assets\.zip\s+(\S+)/,
+            1
+          ]
+
+          asset_sha = hash_cmd[
+            /echo\s+"([0-9a-f]{64})\s+assets\.zip"/,
+            1
+          ]
+
+          abort "Could not parse GLUI asset URL" unless asset_url
+          abort "Could not parse GLUI asset SHA-256" unless asset_sha
+
+          unless joined_prebuild.include?("s/6.7.1/7.3.3/")
+            abort "F-Droid recipe no longer contains expected Gradle 7.3.3 update"
+          end
+
+          unless joined_prebuild.include?("s/4.2.0/7.2.2/")
+            abort "F-Droid recipe no longer contains expected AGP 7.2.2 update"
+          end
+
+          File.open(ENV.fetch("GITHUB_ENV"), "a") do |f|
+            f.puts "RA_VERSION=#{version}"
+            f.puts "RA_VERSION_CODE=#{version_code}"
+            f.puts "RA_COMMIT=#{commit}"
+            f.puts "RA_NDK_METADATA=#{ndk}"
+            f.puts "RA_ASSET_URL=#{asset_url}"
+            f.puts "RA_ASSET_SHA256=#{asset_sha}"
+          end
+
+          File.write(
+            "fdroid-rm-list.txt",
+            Array(build["rm"]).join("\n") + "\n"
+          )
+
+          puts "F-Droid RetroArch build:"
+          puts "  version:     #{version}"
+          puts "  versionCode: #{version_code}"
+          puts "  commit:      #{commit}"
+          puts "  subdir:      #{build["subdir"]}"
+          puts "  gradle:      #{gradle.join(", ")}"
+          puts "  ndk:         #{ndk}"
+          puts "  asset:       #{asset_url}"
+          puts "  asset SHA:   #{asset_sha}"
+          RUBY
+
+      - name: Check whether this release already exists
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${RA_VERSION}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $TAG does not exist."
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop if already built
+        if: steps.release.outputs.needed == 'false'
+        run: |
+          echo "Nothing to do."
+
+      - name: Clone exact RetroArch revision
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            https://github.com/libretro/RetroArch.git \
+            retroarch
+
+          cd retroarch
+          git checkout --detach "$RA_COMMIT"
+
+          echo "Checked out:"
+          git rev-parse HEAD
+
+      - name: Reproduce F-Droid source preparation
+        if: steps.release.outputs.needed == 'true'
+        working-directory: retroarch
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+
+            echo "Removing: $path"
+            rm -rf -- "$path"
+          done < ../fdroid-rm-list.txt
+
+          curl \
+            --fail \
+            --location \
+            --output assets.zip \
+            "$RA_ASSET_URL"
+
+          printf '%s  assets.zip\n' "$RA_ASSET_SHA256" |
+            sha256sum -c -
+
+          unzip -q assets.zip -d assets
+          rm -f assets.zip
+
+          cd pkg/android/phoenix
+
+          sed -i \
+            -e 's/6.7.1/7.3.3/' \
+            gradle/wrapper/gradle-wrapper.properties
+
+          sed -i \
+            -e '/versionCode System/d' \
+            -e '/versionName "${/d' \
+            -e 's/4.2.0/7.2.2/' \
+            build.gradle
+
+          cd ../../../
+
+          ./fetch-submodules.sh
+
+      - name: Add ABI APK splits to the F-Droid normal flavor
+        if: steps.release.outputs.needed == 'true'
+        working-directory: retroarch/pkg/android/phoenix
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("build.gradle")
+          text = path.read_text()
+
+          if "universalApk true" in text:
+              raise SystemExit(
+                  "build.gradle already contains ABI split configuration"
+              )
+
+          text += r'''
+
+          android {
+              splits {
+                  abi {
+                      enable true
+                      reset()
+                      include "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+                      universalApk true
+                  }
+              }
+          }
+          '''
+
+          path.write_text(text)
+          PY
+
+          echo "Injected ABI split configuration:"
+          tail -n 20 build.gradle
+
+      - name: Build normal release with ABI splits
+        if: steps.release.outputs.needed == 'true'
+        working-directory: retroarch/pkg/android/phoenix
+        run: |
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            assembleNormalRelease
+
+      - name: Show Gradle APK outputs
+        if: steps.release.outputs.needed == 'true'
+        working-directory: retroarch/pkg/android/phoenix
+        run: |
+          echo "All APKs produced by Gradle:"
+          find build/outputs/apk \
+            -type f \
+            -name '*.apk' \
+            -print \
+            | sort
+
+      - name: Collect and verify the five APKs
+        if: steps.release.outputs.needed == 'true'
+        working-directory: retroarch/pkg/android/phoenix
+        run: |
+          set -euo pipefail
+
+          OUT="$GITHUB_WORKSPACE/release-assets"
+          APK_ROOT="build/outputs/apk"
+
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          mapfile -t APK_FILES < <(
+            find "$APK_ROOT" \
+              -type f \
+              -name '*.apk' \
+              -print \
+              | sort
+          )
+
+          echo "Found ${#APK_FILES[@]} APK file(s)."
+
+          if [ "${#APK_FILES[@]}" -eq 0 ]; then
+            echo "::error::Gradle produced no APK files."
+            exit 1
+          fi
+
+          echo
+          echo "APK candidates:"
+          printf '  %s\n' "${APK_FILES[@]}"
+
+          declare -A ABI_TO_APK=()
+
+          normalize_abis() {
+            local apk="$1"
+
+            unzip -Z1 "$apk" |
+              awk -F/ '
+                $1 == "lib" &&
+                NF >= 2 &&
+                ($2 == "arm64-v8a" ||
+                 $2 == "armeabi-v7a" ||
+                 $2 == "x86" ||
+                 $2 == "x86_64") {
+                  print $2
+                }
+              ' |
+              sort -u |
+              paste -sd, -
+          }
+
+          for apk in "${APK_FILES[@]}"; do
+            abi_set="$(normalize_abis "$apk")"
+
+            echo
+            echo "Inspecting: $apk"
+            echo "  ABI set: ${abi_set:-<none>}"
+
+            if [ -z "$abi_set" ]; then
+              echo "::error::APK contains no recognized Android native ABI: $apk"
+              exit 1
+            fi
+
+            case "$abi_set" in
+              "arm64-v8a")
+                key="arm64-v8a"
+                ;;
+
+              "armeabi-v7a")
+                key="armeabi-v7a"
+                ;;
+
+              "x86")
+                key="x86"
+                ;;
+
+              "x86_64")
+                key="x86_64"
+                ;;
+
+              "arm64-v8a,armeabi-v7a,x86,x86_64")
+                key="universal"
+                ;;
+
+              *)
+                echo "::error::Unexpected ABI set '$abi_set' in $apk"
+                echo "::error::Expected one of:"
+                echo "::error::  arm64-v8a"
+                echo "::error::  armeabi-v7a"
+                echo "::error::  x86"
+                echo "::error::  x86_64"
+                echo "::error::  arm64-v8a,armeabi-v7a,x86,x86_64"
+                exit 1
+                ;;
+            esac
+
+            if [ -n "${ABI_TO_APK[$key]+x}" ]; then
+              echo "::error::Multiple APKs have the '$key' ABI layout:"
+              echo "::error::  ${ABI_TO_APK[$key]}"
+              echo "::error::  $apk"
+              exit 1
+            fi
+
+            ABI_TO_APK["$key"]="$apk"
+          done
+
+          expected=(
+            "arm64-v8a"
+            "armeabi-v7a"
+            "x86"
+            "x86_64"
+            "universal"
+          )
+
+          for key in "${expected[@]}"; do
+            if [ -z "${ABI_TO_APK[$key]+x}" ]; then
+              echo "::error::Missing required '$key' APK."
+              exit 1
+            fi
+          done
+
+          if [ "${#ABI_TO_APK[@]}" -ne 5 ]; then
+            echo "::error::Expected exactly five distinct APK ABI layouts."
+            echo "::error::Found ${#ABI_TO_APK[@]}."
+            exit 1
+          fi
+
+          echo
+          echo "Successfully identified all five required APK variants:"
+          for key in "${expected[@]}"; do
+            echo "  $key -> ${ABI_TO_APK[$key]}"
+          done
+
+          cp \
+            "${ABI_TO_APK[universal]}" \
+            "$OUT/RetroArch-${RA_VERSION}-fdroid-universal-unsigned.apk"
+
+          cp \
+            "${ABI_TO_APK[arm64-v8a]}" \
+            "$OUT/RetroArch-${RA_VERSION}-fdroid-arm64-v8a-unsigned.apk"
+
+          cp \
+            "${ABI_TO_APK[armeabi-v7a]}" \
+            "$OUT/RetroArch-${RA_VERSION}-fdroid-armeabi-v7a-unsigned.apk"
+
+          cp \
+            "${ABI_TO_APK[x86]}" \
+            "$OUT/RetroArch-${RA_VERSION}-fdroid-x86-unsigned.apk"
+
+          cp \
+            "${ABI_TO_APK[x86_64]}" \
+            "$OUT/RetroArch-${RA_VERSION}-fdroid-x86_64-unsigned.apk"
+
+          echo
+          echo "Final unsigned artifacts:"
+          ls -lh "$OUT"
+
+      - name: Prepare persistent release signing key
+        if: steps.release.outputs.needed == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 is not configured."
+            exit 1
+          fi
+
+          printf '%s' "$KEYSTORE_B64" |
+            base64 --decode > release-key.jks
+
+          chmod 600 release-key.jks
+
+      - name: Sign and verify APKs
+        if: steps.release.outputs.needed == 'true'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KEYSTORE_PASSWORD" ] ||
+             [ -z "$KEY_PASSWORD" ] ||
+             [ -z "$KEY_ALIAS" ]; then
+            echo "::error::Android signing secrets are incomplete."
+            exit 1
+          fi
+
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+
+          if [ ! -x "$ZIPALIGN" ]; then
+            echo "::error::zipalign not found: $ZIPALIGN"
+            exit 1
+          fi
+
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner not found: $APKSIGNER"
+          exit 1
+          fi
+
+          echo "Using:"
+          echo "  zipalign:  $ZIPALIGN"
+          echo "  apksigner: $APKSIGNER"
+
+          mkdir -p signed
+
+          for apk in release-assets/*-unsigned.apk; do
+            name="$(basename "$apk" -unsigned.apk)"
+            aligned="signed/${name}-aligned.apk"
+            output="signed/${name}.apk"
+
+            echo "Signing $(basename "$apk")"
+
+            "$ZIPALIGN" \
+              -f \
+              -p \
+              4 \
+              "$apk" \
+              "$aligned"
+
+            "$APKSIGNER" sign \
+              --ks release-key.jks \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "env:KEYSTORE_PASSWORD" \
+              --key-pass "env:KEY_PASSWORD" \
+              --out "$output" \
+              "$aligned"
+
+            "$APKSIGNER" verify --verbose "$output"
+
+            rm -f "$aligned"
+          done
+
+      - name: Check final APK package/version metadata
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+
+          AAPT="$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}/aapt"
+
+          for apk in signed/*.apk; do
+            echo
+            echo "===== $(basename "$apk") ====="
+
+            package_line="$(
+              "$AAPT" dump badging "$apk" |
+                grep '^package:' |
+                head -n 1
+            )"
+
+            echo "$package_line"
+
+            echo "$package_line" |
+              grep -Fq "name='com.retroarch'" ||
+              {
+                echo "::error::Wrong package name in $apk"
+                exit 1
+              }
+
+            echo "$package_line" |
+              grep -Fq "versionCode='${RA_VERSION_CODE}'" ||
+              {
+                echo "::error::Wrong versionCode in $apk"
+                exit 1
+              }
+
+            echo "$package_line" |
+              grep -Fq "versionName='${RA_VERSION}'" ||
+              {
+                echo "::error::Wrong versionName in $apk"
+                exit 1
+              }
+          done
+
+      - name: Rename final APKs
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+
+          rm -rf final
+          mkdir final
+
+          cp signed/*-universal.apk final/
+          cp signed/*-arm64-v8a.apk final/
+          cp signed/*-armeabi-v7a.apk final/
+          cp signed/*-x86.apk final/
+          cp signed/*-x86_64.apk final/
+
+          count="$(
+            find final \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' |
+              wc -l
+          )"
+
+          if [ "$count" -ne 5 ]; then
+            echo "::error::Expected five final APKs, found $count."
+            exit 1
+          fi
+
+          echo "Final APKs:"
+          ls -lh final
+
+      - name: Generate checksums and build metadata
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+
+          (
+            cd final
+            sha256sum *.apk > SHA256SUMS
+          )
+
+          cat > final/build-metadata.txt <<EOF
+          RetroArch F-Droid ABI builds
+
+          F-Droid app ID: ${FDROID_APP_ID}
+          F-Droid version: ${RA_VERSION}
+          F-Droid versionCode: ${RA_VERSION_CODE}
+
+          RetroArch commit:
+          ${RA_COMMIT}
+
+          F-Droid NDK requirement:
+          ${RA_NDK_METADATA}
+
+          Android platform:
+          ${ANDROID_PLATFORM}
+
+          Android build-tools:
+          ${ANDROID_BUILD_TOOLS}
+
+          Gradle:
+          7.3.3
+
+          Android Gradle Plugin:
+          7.2.2
+
+          Gradle task:
+          assembleNormalRelease
+
+          APK variants:
+          universal
+          arm64-v8a
+          armeabi-v7a
+          x86
+          x86_64
+
+          These APKs are independently signed and are not signed by F-Droid.
+          EOF
+
+          echo "SHA-256:"
+          cat final/SHA256SUMS
+
+          echo
+          echo "Build metadata:"
+          cat final/build-metadata.txt
+
+      - name: Create GitHub Release
+        if: steps.release.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${RA_VERSION}"
+
+          cat > release-notes.md <<EOF
+          Built from this [exact commit](https://github.com/libretro/RetroArch/commit/${RA_COMMIT}).
+          F-Droid version code: \`${RA_VERSION_CODE}\`
+          EOF
+
+          gh release create \
+            "$TAG" \
+            --title "${RA_VERSION}" \
+            --notes-file release-notes.md \
+            final/*.apk \
+            final/SHA256SUMS \
+            final/build-metadata.txt
