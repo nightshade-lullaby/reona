@@ -1,4 +1,4 @@
-name: F-Droid Variant Builds
+name: Build fdroid flavour
 
 on:
   workflow_dispatch:
@@ -675,8 +675,10 @@ jobs:
           TAG="${RA_VERSION}"
 
           cat > release-notes.md <<EOF
-          Built from this [exact commit](https://github.com/libretro/RetroArch/commit/${RA_COMMIT}).
-          F-Droid version code: \`${RA_VERSION_CODE}\`
+          Built from [this commit hash](https://github.com/libretro/RetroArch/commit/${RA_COMMIT}).
+          Version code: \`${RA_VERSION_CODE}\`
+
+          **Full Changelog**: https://github.com/libretro/RetroArch/blob/HEAD/CHANGES.md
           EOF
 
           gh release create \
