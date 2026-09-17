@@ -678,7 +678,7 @@ jobs:
           Built from [this commit hash](https://github.com/libretro/RetroArch/commit/${RA_COMMIT}).
           Version code: \`${RA_VERSION_CODE}\`
 
-          **Full Changelog**: https://github.com/libretro/RetroArch/blob/HEAD/CHANGES.md
+          **Full Changelog**: [CHANGES.md](https://github.com/libretro/RetroArch/blob/HEAD/CHANGES.md)
           EOF
 
           gh release create \
