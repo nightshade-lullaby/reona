@@ -6,8 +6,8 @@
   </a>
 </p>
 
-[![Build status](https://img.shields.io/github/actions/workflow/status/nightshade-lullaby/reona/.github/workflows/build.yml?logo=github&color=white)](https://github.com/nightshade-lullaby/reona/actions/workflows/build.yml)
-[![Downstream release tag](https://img.shields.io/github/v/release/nightshade-lullaby/reona?logo=retroarch&logoColor=black&color=pink)](https://github.com/nightshade-lullaby/reona/releases/latest)
+[![Build status](https://img.shields.io/github/actions/workflow/status/nightshade-lullaby/reona/.github/workflows/build.yml?logo=github)](https://github.com/nightshade-lullaby/reona/actions/workflows/build.yml)
+[![Downstream release tag](https://img.shields.io/github/v/release/nightshade-lullaby/reona?logo=retroarch&color=white)](https://github.com/nightshade-lullaby/reona/releases/latest)
 [![Upstream release tag](https://img.shields.io/f-droid/v/com.retroarch?logo=fdroid&logoColor=B2EB0C)](https://f-droid.org/en/packages/com.retroarch/)
 
 ---
