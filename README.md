@@ -6,9 +6,9 @@
   </a>
 </p>
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/nightshade-lullaby/reona/.github/workflows/build-retroarch-fdroid.yml?logo=github&color=white)](https://github.com/nightshade-lullaby/retroarch/actions/workflows/build-retroarch-fdroid.yml)
-[![Downstream Release Tag](https://img.shields.io/github/v/release/nightshade-lullaby/reona?logo=fdroid&color=blue)](https://github.com/nightshade-lullaby/reona/releases/latest)
-[![Upstream Release Tag](https://img.shields.io/github/v/release/libretro/RetroArch?label=upstream&color=pink&logo=retroarch)](https://github.com/libretro/RetroArch/releases/latest)
+[![Build status](https://img.shields.io/github/actions/workflow/status/nightshade-lullaby/reona/.github/workflows/build.yml?logo=github&color=white)](https://github.com/nightshade-lullaby/reona/actions/workflows/build.yml)
+[![Downstream release tag](https://img.shields.io/github/v/release/nightshade-lullaby/reona?logo=retroarch&logoColor=black&color=pink)](https://github.com/nightshade-lullaby/reona/releases/latest)
+[![Upstream release tag](https://img.shields.io/f-droid/v/com.retroarch?logo=fdroid&logoColor=B2EB0C)](https://f-droid.org/en/packages/com.retroarch/)
 
 ---
 
