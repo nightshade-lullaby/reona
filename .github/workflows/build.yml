@@ -1,4 +1,4 @@
-name: Build fdroid flavour
+name: build
 
 on:
   workflow_dispatch:
