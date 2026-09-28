@@ -12,4 +12,10 @@
 
 ---
 
-placeholder for now
+This repository contains an automated workflow to build and release an F-Droid variant of the [RetroArch](https://github.com/libretro/retroarch) application.
+
+Build pipeline is **partially** replicated, however app functionality should remain identical.
+
+No affiliation with the original author(s).
+
+---
