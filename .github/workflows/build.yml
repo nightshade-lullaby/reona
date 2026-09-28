@@ -50,7 +50,7 @@ jobs:
 
       - name: Install Android SDK/NDK versions used by F-Droid
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager \
             "platforms;${ANDROID_PLATFORM}" \
